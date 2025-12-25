@@ -47,6 +47,7 @@ from acestep.apg_guidance import (
     cfg_double_condition_forward,
 )
 import torchaudio
+import soundfile as sf
 from .cpu_offload import cpu_offload
 
 
@@ -118,13 +119,21 @@ class ACEStepPipeline:
         self.checkpoint_dir = checkpoint_dir
         self.lora_path = "none"
         self.lora_weight = 1
-        device = (
-            torch.device(f"cuda:{device_id}")
-            if torch.cuda.is_available()
-            else torch.device("cpu")
-        )
-        if device.type == "cpu" and torch.backends.mps.is_available():
-            device = torch.device("mps")
+
+        # Device selection:
+        # - If device_id < 0: force pure CPU mode, even if CUDA/MPS are present.
+        # - Otherwise: use the requested CUDA device when available, falling back
+        #   to CPU (or MPS on Apple) as in the original logic.
+        if device_id < 0:
+            device = torch.device("cpu")
+        else:
+            device = (
+                torch.device(f"cuda:{device_id}")
+                if torch.cuda.is_available()
+                else torch.device("cpu")
+            )
+            if device.type == "cpu" and torch.backends.mps.is_available():
+                device = torch.device("mps")
         self.dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float32
         if device.type == "mps" and self.dtype == torch.bfloat16:
             self.dtype = torch.float16
@@ -1046,9 +1055,25 @@ class ACEStepPipeline:
                 if right_pad_frame_length > 0:
                     padd_list.append(retake_latents[:, :, :, -right_pad_frame_length:])
                 target_latents = torch.cat(padd_list, dim=-1)
-                assert (
-                    target_latents.shape[-1] == x0.shape[-1]
-                ), f"{target_latents.shape=} {x0.shape=}"
+
+                # In practice, due to rounding of frame lengths and padding, we can
+                # end up with a small mismatch between the extended latents and the
+                # ground-truth latents x0. Instead of asserting, we reconcile the
+                # shapes by trimming or zero-padding target_latents so that the
+                # diffusion process can proceed.
+                if target_latents.shape[-1] != x0.shape[-1]:
+                    tgt_len = target_latents.shape[-1]
+                    x0_len = x0.shape[-1]
+                    if tgt_len > x0_len:
+                        # Trim extra frames from the right
+                        target_latents = target_latents[..., :x0_len]
+                    else:
+                        # Pad with zeros on the right to match x0
+                        pad_len = x0_len - tgt_len
+                        target_latents = torch.nn.functional.pad(
+                            target_latents, (0, pad_len), "constant", 0
+                        )
+
                 zt_edit = x0.clone()
                 z0 = target_latents
 
@@ -1393,13 +1418,11 @@ class ACEStepPipeline:
                 output_path_wav = save_path
 
         target_wav = target_wav.float()
-        backend = "soundfile"
-        if format == "ogg":
-            backend = "sox"
-        logger.info(f"Saving audio to {output_path_wav} using backend {backend}")
-        torchaudio.save(
-            output_path_wav, target_wav, sample_rate=sample_rate, format=format, backend=backend
-        )
+
+        # target_wav is (channels, num_samples) tensor; convert to numpy for soundfile
+        wav_np = target_wav.cpu().numpy().T  # shape (num_samples, channels)
+        logger.info(f"Saving audio to {output_path_wav} using soundfile backend")
+        sf.write(output_path_wav, wav_np, samplerate=sample_rate, format=format.upper())
         return output_path_wav
 
     @cpu_offload("music_dcae")

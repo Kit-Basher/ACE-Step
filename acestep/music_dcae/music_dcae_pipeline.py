@@ -10,6 +10,7 @@ import os
 import torch
 from diffusers import AutoencoderDC
 import torchaudio
+import soundfile as sf
 import torchvision.transforms as transforms
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.loaders import FromOriginalModelMixin
@@ -60,9 +61,22 @@ class MusicDCAE(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.shift_factor = -1.9091
 
     def load_audio(self, audio_path):
-        audio, sr = torchaudio.load(audio_path)
+        """Load an audio file as a 2-channel tensor at its native sample rate.
+
+        We prefer soundfile here to avoid the optional torchcodec dependency
+        that newer torchaudio.load() paths may require. The rest of the
+        pipeline (encode/decode) still uses torchaudio for resampling.
+        """
+
+        # Use soundfile to read (num_samples, channels), then transpose to
+        # (channels, num_samples) expected by the rest of the code.
+        data, sr = sf.read(audio_path, always_2d=True)
+        audio = torch.from_numpy(data.T).float()
+
+        # Ensure stereo: if single channel, duplicate to 2 channels.
         if audio.shape[0] == 1:
             audio = audio.repeat(2, 1)
+
         return audio, sr
 
     def forward_mel(self, audios):

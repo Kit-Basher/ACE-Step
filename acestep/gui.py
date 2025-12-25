@@ -52,7 +52,15 @@ def main(checkpoint_path, server_name, port, device_id, share, bf16, torch_compi
     Main function to launch the ACE Step pipeline demo.
     """
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
+    # If a non-negative device_id is provided, pin the process to that CUDA
+    # device. If device_id is negative, we treat this as a signal to run on CPU
+    # only and avoid exposing any CUDA devices to the pipeline.
+    if device_id >= 0:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
+    else:
+        # Clear CUDA visibility so torch.cuda.is_available() returns False and
+        # the models are placed on CPU.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     from acestep.ui.components import create_main_demo_ui
     from acestep.pipeline_ace_step import ACEStepPipeline
@@ -60,10 +68,11 @@ def main(checkpoint_path, server_name, port, device_id, share, bf16, torch_compi
 
     model_demo = ACEStepPipeline(
         checkpoint_dir=checkpoint_path,
+        device_id=device_id,
         dtype="bfloat16" if bf16 else "float32",
         torch_compile=torch_compile,
         cpu_offload=cpu_offload,
-        overlapped_decode=overlapped_decode
+        overlapped_decode=overlapped_decode,
     )
     data_sampler = DataSampler()
 
